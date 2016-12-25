@@ -1,0 +1,149 @@
+---
+title: "Machine Learning - Course Project"
+author: "Massimo Di Michele"
+date: "12/23/2016"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+setwd("/Users/massimodimichele/Dropbox/Coursera/Data Science - Johns Hopkins/8 - Practical Machine Learning/assignment")
+load("Prudence1.RData")
+```
+
+## Abstract
+
+The object of this analysis is to build a model to predict "how well" barbell weights lifting exercises are performed. To begin with, we load the data and the required packages.
+
+```{r load.train, results='hide', eval=FALSE}
+if(!file.exists("pml-training.csv")) {
+        fileURL = "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+        download.file(fileURL, destfile = "pml-training.csv", method = "auto")
+}
+
+tr.data = read.csv("pml-training.csv")
+
+library(caret)
+library(ggplot2)
+library(rattle)
+library(forecast)
+set.seed(233)
+```
+
+## Cleaning the data
+
+Secondly, we clean data. We start by removing certain variables (such as date, time and name of subject performing the exercise) from the dataset. This operation is limited to the first 7 columns of the dataset. We also convert all variables to numeric and remove columns containing NAs.
+Arbitrarily removing data is never a good thing; however, certain machine learning algorithms cannot handle NAs and ignore the affected records. The affected variables do show proper values about 2% of the times (i.e. when the window is reset), so populating NAs based on existing data would inevitably distort the information and is not a recommendable procedure in this instance.
+
+```{r na.check}
+length(unique(tr.data$skewness_roll_belt)) / length(tr.data$skewness_roll_belt)
+```
+```{r data.cleaning, eval=FALSE}
+tr.data.red = tr.data[,-c(1:7,160)]
+indx = sapply(tr.data.red, is.factor)
+tr.data.red[indx] = lapply(tr.data.red[indx], function(x) as.numeric(as.character(x)))
+indx = sapply(tr.data.red, function(x) sum(is.na(x)) > 5000)
+tr.data.red = tr.data.red[, !indx]
+classe = tr.data$classe
+tr.data.red = cbind(classe, tr.data.red)
+```
+
+Now let's perform a non-zero variance test to make sure that all variables at our disposal are significant and we do not need to filter out any further, at least at this preliminary stage.
+
+```{r nzv}
+nearZeroVar(tr.data.red, saveMetrics = TRUE)
+```
+
+All variables are non-zero.
+There is a further step to perform, functional to our model building and essential to ensure proper cross-validation. The data do not appear to be in random order. In fact, a quick look at the original dataset shows that the records are ordered by subject performing the exercise and time. Using K-fold cross validation (as we will) and randomizing the records ensures proper cross-validation.
+
+```{r randomization}
+tr.data.red = tr.data.red[sample(nrow(tr.data.red)),]
+```
+
+Finally, we add a short chunk of code to optimize computing power as we will deal with computationally intensive calculations in the following.
+
+```{r optimization.init, results='hide', eval=FALSE}
+library(parallel)
+library(doParallel)
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)
+```
+
+## Building the model
+
+The outcomes are classified in 5 categories. A prediction tree approach looks suitable to address the matter at hand. We always use K-fold cross-validation in the models built in this section, with the exception of the random forests model where the sampling performed by the algorithm at each noted performs cross-validation inherently. (train control is still part of the parameters as it specifies how random forests samples data.)
+
+```{r rpart}
+train.control <- trainControl(method="cv", number=5, savePredictions = TRUE, allowParallel = TRUE)
+```
+```{r rpart2, eval=FALSE}
+rpartMod = train(classe ~ ., method = "rpart",  data = tr.data.red, trControl = train.control)
+```
+```{r rpart3, eval=TRUE}
+rpartMod
+fancyRpartPlot(rpartMod$finalModel)
+```
+
+Unfortunately the algorithm seems to be accurate about 50% of the time, a very low score. Also in the graphic representation we can witness the prediction error. This means that adopting an algorithm whereby we split based on a variable at the time does not yield a good prediction. We should consider a set of variables in aggregate for each node in order to improve our estimates. How we determine the variables to choose? To address these points we try a random forests approach next, which is really demanding on the machine and requires some time to run.
+
+```{r rf, eval=FALSE}
+rfMod = train(classe ~ ., method = "rf", data = tr.data.red, trControl = train.control, prox = TRUE)
+```
+```{r rf2}
+rfMod$finalModel
+plot(rfMod)
+```
+
+The accuracy has increased to a level close to 100%, meaning that the prediction matches the actual classification in virtually all instances. In particular, the OOB (out-of-bag) error tells us that we can expect that same error rate for samples outside the "test" subset as sampled by the algorithm.
+The output also shows that the optimal number of predictors needed to minimize error is 27. There is also a quite high accuracy level for a 2 factor model, so we can trade accuracy for speed by choosing a subset of predictors in this range. Let's take a closer look at the relative importance of the variables.
+
+```{r plot.var}
+varImpPlot(rfMod$finalModel)
+```
+
+The top 7 variable contribution to model accuracy visually seem to contribute for most of the predictive power of the model. Let's see if we can isolate those variables and run a more efficient algorithm.
+
+```{r knn}
+tr.data.lodim = tr.data.red[,c("classe","roll_belt","pitch_forearm", "yaw_belt","pitch_belt",
+                               "magnet_dumbbell_y","magnet_dumbbell_y","magnet_dumbbell_z")]
+```
+```{r knn2, eval=FALSE}
+knnMod = train(classe ~ ., method = "knn", data = tr.data.lodim, trControl = train.control)
+```
+```{r knn3}
+knnPreds = predict(knnMod, tr.data.lodim)
+confusionMatrix(tr.data.red$classe, knnPreds)
+```
+
+Just a few seconds to run and about 90% accuracy, not bad at all. The trade-off between execution speed and accuracy is evident. We can plot the error term; however, be wary of the interpretation of the error term in the context of this model (notice Neighbors on the x axis as opposed to the Randomly Selected Predictors which we had with the random forests algorithm)
+
+```{r plot.knn}
+plot(knnMod)
+```
+
+## Predicting
+
+To test the model, we first download and load the required test data.
+
+```{r load.test}
+if(!file.exists("pml-testing.csv")) {
+        fileURL = "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+        download.file(fileURL, destfile = "pml-testing.csv", method = "auto")
+}
+test.data = read.csv("pml-testing.csv")
+```
+
+We can now use our random forest model to predict the output to get our results.
+
+```{r compare}
+testPreds = predict(rfMod, test.data)
+testPreds
+```
+
+We conclude by closing the optimization routine which we initiated earlier.
+
+```{r optimization.end, eval=FALSE}
+stopCluster(cluster)
+registerDoSEQ()
+```
